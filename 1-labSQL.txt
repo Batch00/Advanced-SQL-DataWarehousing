@@ -1,0 +1,187 @@
+---------------------------------
+-- WEEK #1 - SQL REFRESHER
+---------------------------------
+
+-- Use CTRL (OR CMD) + ENTR to execute a select command.
+
+-- Choose the role to use.
+-- We will use "sysadmin" to create the warehouse, database, and tables.
+USE ROLE sysadmin;
+
+---------------------------------
+-- CREATING WAREHOUSES & DATABASES
+---------------------------------
+
+-- Create a new WAREHOUSE for table creation and data loading.
+-- Remember, WAREHOUSES process data. DATABASES store data.
+CREATE OR REPLACE WAREHOUSE loading_wh WITH
+    WAREHOUSE_SIZE='X-SMALL'
+    AUTO_RESUME = TRUE -- default
+    AUTO_SUSPEND = 600 -- default
+    INITIALLY_SUSPENDED = TRUE; -- default
+
+-- Create a new database to store bike trips.
+CREATE DATABASE IF NOT EXISTS bike;
+
+-- Set the CONTEXT. (i.e. Information about your environment.)
+-- The PUBLIC schema is the default schema that all users have access to.
+-- It is often used for development and testing.
+USE bike.public;
+USE WAREHOUSE loading_wh;
+
+-- Create the table, where trip data will be stored.  (DDL is free.)
+CREATE OR REPLACE TABLE trips (
+    tripduration integer,
+    starttime timestamp,
+    stoptime timestamp,
+    start_station_id integer,
+    start_station_name string,
+    start_station_latitude float,
+    start_station_longitude float,
+    end_station_id integer,
+    end_station_name string,
+    end_station_latitude float,
+    end_station_longitude float,
+    bikeid integer,
+    membership_type string,
+    usertype string,
+    birth_year integer,
+    gender integer
+);
+
+---------------------------------
+-- CREATING STAGES
+---------------------------------
+
+-- Create a STAGE that specifies the location of the S3 bucket.
+-- STAGES are locations where files are stored for loading or unloading.
+-- This is public S3 bucket, so no credentials are required.
+CREATE OR REPLACE STAGE bike_stage
+    url = 's3://bike-data-files/';
+
+-- List the files in the stage. (It does NOT show delimiters.)
+LIST @bike_stage;
+
+-- Review the properties of the stage. (Delimiters are noted.)
+DESCRIBE STAGE bike_stage;
+
+---------------------------------
+-- CREATING FILE FORMATS
+---------------------------------
+
+-- Create a FILE FORMAT that matches the data structure.
+-- It describes what the staged files look like.
+-- This statement includes several default values, just as an example.
+CREATE OR REPLACE FILE FORMAT bike_csv
+    type='csv'
+    compression = 'auto' -- compression checked automatically (default)
+    field_delimiter = ',' -- columns separated by commas (default)
+    record_delimiter = '\n' -- rows separated by newlines (default)
+    skip_header = 0 -- does not skip lines in the file (default)
+    trim_space = false -- does not remove white space from fields (default)
+    null_if = ('') -- replace these values with SQL NULL
+    date_format = 'auto' -- date checked automatically (default)
+    timestamp_format = 'auto' -- time checked automatically (default)
+    field_optionally_enclosed_by = '\042' -- strings closed by " " (octal)
+    escape_unenclosed_field = '\134' -- backslash escapes the delimiter in unenclosed fields
+    error_on_column_count_mismatch = false -- checks if # of columns in file/table match
+    comment = 'file format for raw trips data'
+;
+
+-- Confirm the file format was created.
+SHOW FILE FORMATS IN DATABASE bike;
+
+---------------------------------
+-- LOADING DATA
+---------------------------------
+
+-- Use a COPY COMMAND to load staged data into the table.
+COPY INTO trips -- the destination table
+FROM @bike_stage -- the source stage
+file_format = bike_csv -- the file format
+PATTERN = '.*csv.*'; -- the filenames to match
+
+-- COUNT the number of records in the trips table.
+SELECT COUNT(*) FROM trips;
+
+-- Clear the table, so we can experiment with different warehouse sizes.
+TRUNCATE trips;
+SELECT * FROM trips LIMIT 10;
+
+-- Increase warehouse size to evaluate loading impact.
+ALTER WAREHOUSE loading_wh
+SET warehouse_size='LARGE';
+
+-- RELOAD the staged data into the table.
+-- Then, review QUERY HISTORY to compare loads.
+COPY INTO trips -- the destination table
+FROM @bike_stage -- the source stage
+file_format = bike_csv -- the file format
+PATTERN = '.*csv.*'; -- the filenames to match
+
+-- Readjust warehouse size after testing.
+ALTER WAREHOUSE loading_wh
+SET warehouse_size='X-SMALL';
+
+---------------------------------
+-- ANALYZING DATA
+---------------------------------
+
+-- Normally, analytics users have a different role than "sysadmin",
+-- Also, queries may be done in other tools, like PowerBI.
+
+-- Create a new warehouse for analysis (queries).
+-- This warehouse separation avoids interference and allows for monitoring.
+-- For example, "How much are we spending on data loading?"
+CREATE OR REPLACE WAREHOUSE query_wh WITH
+    WAREHOUSE_SIZE='X-SMALL'
+    AUTO_RESUME = TRUE -- default
+    AUTO_SUSPEND = 600 -- default
+    INITIALLY_SUSPENDED = TRUE; -- default
+    
+-- Preview 10 records of trip data.
+SELECT * FROM trips LIMIT 10;
+
+-- Identify the earliest and latest date in the data.
+SELECT MIN(STARTTIME), MAX(STARTTIME) FROM trips;
+
+-- What is the average trip time for the different user types
+SELECT 
+    usertype, 
+    ROUND(AVG(tripduration)/60, 1) as avg_trip_mins
+FROM trips
+GROUP BY usertype
+HAVING usertype IS NOT NULL
+ORDER BY avg_trip_mins DESC;
+
+-- How many different types of memberships are there and which are most popular
+SELECT 
+    membership_type,
+    COUNT(*) as num_members
+FROM trips
+GROUP BY membership_type
+HAVING membership_type IS NOT NULL
+ORDER BY num_members DESC;
+
+-- Which bikes were used the most
+SELECT 
+    bikeid, 
+    COUNT(*) as num_rides, 
+    ROUND(SUM(tripduration/3600)) as hrs_riding
+FROM trips
+GROUP BY bikeid
+ORDER BY hrs_riding DESC, num_rides DESC
+LIMIT 100;
+
+---------------------------------
+-- CLONING TABLES
+---------------------------------
+
+-- Clone the trips table to demonstrate "zero-copy" cloning.
+-- The underlying data is not copied.
+-- A common use case is coping production for development/testing.
+CREATE TABLE _____
+CLONE _____;
+
+-- Count the number of records in the table clone.
+_____

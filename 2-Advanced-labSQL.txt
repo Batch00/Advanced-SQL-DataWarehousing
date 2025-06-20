@@ -1,0 +1,283 @@
+
+---------------------------------
+-- WEEK #2 - ADVANCED TOPICS
+---------------------------------
+
+-- Set the context.
+USE ROLE sysadmin;
+USE bike.PUBLIC;
+USE WAREHOUSE loading_wh;
+
+---------------------------------
+-- WORKING WITH SEMI-STRUCTURED DATA
+---------------------------------
+
+-- Create a table to store the weather data (JSON file).
+CREATE TABLE weather_json (v variant);
+
+-- Create a stage that specifies the location of the S3 bucket.
+-- This is public bucket, so no credentials are required.
+CREATE OR REPLACE STAGE weather_stage
+    url = 's3://weather-files/';
+
+-- List the files in the stage.
+-- Remember, our trip data is from mid-2013 to mid-2018.
+-- This weather data is from late-2016 to mid-2019.
+LIST @weather_stage;
+
+-- Load the staged data into the table.
+COPY INTO weather_json
+FROM @weather_stage
+file_format = (type = json
+               strip_outer_array = true);
+               
+-- Preview 10 records.
+SELECT* FROM weather_json LIMIT 10;
+
+-- Create a view that will structure the semi-structured data.
+-- In this case, a VIEW allows the data to be queried like a table.
+-- The DOT NOTATION allows us to pull data lower in the hierarchy.
+CREATE OR REPLACE VIEW weather_view AS
+SELECT
+    v:obsTime::timestamp as observation_time,
+    v:station::string as station_id,
+    v:name::string as city_name,
+    v:country::string as country,
+    v:latitude::float as city_lat,
+    v:longitude::float as city_lon,
+    v:weatherCondition::string as weather_conditions,
+    v:coco::int as weather_conditions_code,
+    v:temp::float as temp,
+    v:prcp::float as rain,
+    v:tsun::float as tsun,
+    v:wdir::float as wind_dir,
+    v:wspd::float as wind_speed,
+    v:dwpt::float as dew_point,
+    v:rhum::float as relative_humidity,
+    v:pres::float as pressure
+FROM
+    weather_json
+WHERE
+    station_id = '72502';
+
+-- Preview 10 records of the VIEW.
+SELECT * FROM weather_view LIMIT 10;
+
+-- Examine a month of weather data.
+-- This includes hourly measurements during January 2018.
+SELECT *
+FROM weather_view
+WHERE DATE_TRUNC('_____',observation_time) = '2018-01-01';
+
+---------------------------------
+-- USING ADVANCED SQL
+---------------------------------
+
+-- First, we'll switch to the QUERY_WH as we explore the data.
+USE WAREHOUSE query_wh;
+
+-- Add the queries discussed in class.
+
+-- Rank Station Name by startime
+SELECT 
+    starttime, 
+    start_station_name, 
+    RANK() OVER (ORDER BY starttime) trip_number
+FROM trips
+ORDER BY starttime
+LIMIT 10;
+
+-- Average Duration for all trips
+SELECT 
+    starttime, 
+    start_station_name, 
+    ROUND(tripduration/60) as trip_duration,
+    ROUND(AVG(trip_duration) OVER ()) average_duration
+FROM trips
+ORDER BY starttime
+LIMIT 10;
+
+-- Running total using rows unbounded preceding
+SELECT 
+    EXTRACT(year, starttime) AS year, 
+    MONTH(starttime) AS month,
+    COUNT(*) as trips,
+    SUM(trips) OVER (ORDER BY year, month 
+                     ROWS UNBOUNDED PRECEDING) AS cumulative_trips
+FROM trips 
+GROUP BY year, month
+ORDER BY year, month;
+
+-- using lag for previous month and change in trips
+SELECT 
+    EXTRACT(year, starttime) AS year, 
+    EXTRACT(month, starttime) AS month,
+    COUNT(*) as trips,
+    LAG(trips) OVER (ORDER BY year, month) AS previous_month,
+    (trips - previous_month) as change_in_trips
+FROM trips 
+GROUP BY year, month
+ORDER BY year, month
+LIMIT 100;
+
+-- When customers were riding bikes and what was the weather
+
+SELECT 
+    t.starttime,
+    w.weather_conditions
+FROM trips t
+INNER JOIN weather_view w
+ON DATE_TRUNC('hour', t.starttime) = DATE_TRUNC('hour', w.observation_time)
+ORDER BY t.starttime
+LIMIT 200;
+
+-- How many trips are in each weather condition
+SELECT 
+    w.weather_conditions,
+    COUNT(*) as num_trips
+FROM trips t
+INNER JOIN weather_view w
+ON DATE_TRUNC('hour', t.starttime) = DATE_TRUNC('hour', w.observation_time)
+GROUP BY weather_conditions
+ORDER BY num_trips DESC
+LIMIT 200;
+
+-- Get num rides and average temp using CTE
+WITH monthly_rides AS (
+    SELECT
+        DATE_TRUNC(month, starttime) AS month,
+        COUNT(*) as num_rides,
+    FROM trips t
+    GROUP BY month
+    ORDER BY month
+),
+monthly_temp AS (
+    SELECT
+        DATE_TRUNC('month', observation_time) AS month,
+        ROUND(AVG(w.temp), 1) AS avg_temp
+    FROM weather_view w
+    GROUP BY month
+    ORDER BY month
+) 
+SELECT
+    EXTRACT(year, r.month) as year,
+    EXTRACT(month, r.month) as month,
+    r.num_rides,
+    t.avg_temp
+FROM monthly_rides r
+INNER JOIN monthly_temp t
+ON r.month = t.month
+ORDER BY year,month
+;
+
+-- monthly growth rate in rentals and is there seasonality
+SELECT 
+    DATE_TRUNC('MONTH', starttime) AS month,
+    COUNT(*) as current_rentals,
+    LAG(current_rentals) OVER (ORDER BY month) AS previous_rentals,
+    ROUND((current_rentals - previous_rentals) / previous_rentals, 2) AS growth_rate
+FROM trips 
+GROUP BY month
+ORDER BY month
+;
+
+-- for each bike examine yearly usage and total usage
+WITH annual_bike_time AS(
+    SELECT 
+        bikeid, 
+        EXTRACT(YEAR, starttime) AS year,
+        ROUND(SUM(tripduration/3600)) AS annual_bike_time_hrs
+    FROM trips
+    GROUP BY bikeid, year
+    
+)
+SELECT
+    bikeid,
+    year,
+    annual_bike_time_hrs,
+    SUM(annual_bike_time_hrs) OVER (PARTITION BY bikeid) AS total_bike_time_hrs
+FROM annual_bike_time
+ORDER BY bikeid, year
+;
+
+
+---------------------------------
+-- TIME TRAVEL
+---------------------------------
+
+-- Enables historical data access.
+-- The default is 24 hours.
+-- Common uses include restoring or backing up data.
+
+-- DROP & UNDROP TABLES
+DROP TABLE weather_json;
+SELECT * FROM weather_json LIMIT 10;
+UNDROP TABLE weather_json;
+SELECT * FROM weather_json LIMIT 10;
+
+-- ROLLBACK TABLES
+-- Count rides by starting station.
+SELECT start_station_name, COUNT(*) FROM trips GROUP BY start_station_name;
+-- Set all starting stations to "oops".
+UPDATE trips SET start_station_name = 'oops';
+-- Recount rides by starting station.
+SELECT start_station_name, COUNT(*) FROM trips GROUP BY start_station_name;
+-- Option #1: Find the query ID in the console.
+-- Option #2: Find the query ID using SQL.
+SELECT * FROM table(information_schema.query_history_by_session (result_limit=>10));
+-- Restore the table using the query ID.
+CREATE OR REPLACE TABLE trips AS
+(SELECT * FROM trips before (statement => '01bacee6-0002-82ea-0007-30520009609e'));
+-- RECOUNT rides by starting station. (It should be restored.)
+SELECT start_station_name, COUNT(*) FROM trips GROUP BY start_station_name;
+
+---------------------------------
+-- ACCESS CONTROL
+---------------------------------
+
+-- Dictates what a user can access and to what extent.
+-- For our purposes, let's assume a new analyst joined the team.
+-- Switch to the SECURITYADMIN role to create a new role.
+USE ROLE _____;
+
+-- Create a new role and assign a user to it (yourself).
+CREATE ROLE _____;
+GRANT ROLE _____ TO USER _____;
+
+-- Switch roles to see access (nothing) then switch back to grant.
+USE ROLE junior_analyst;
+SELECT * FROM trips LIMIT 10;
+USE ROLE sysadmin;
+SELECT * FROM trips LIMIT 10;
+
+-- Provide access to the appropriate warehouse and databases.
+-- We will not provide "GRANT ALL" to this user.
+USE ROLE securityadmin;
+GRANT USAGE ON DATABASE _____ TO ROLE junior_analyst;
+GRANT USAGE ON SCHEMA _____ TO ROLE junior_analyst;
+GRANT SELECT ON ALL TABLES IN SCHEMA _____ to ROLE junior_analyst;
+GRANT OPERATE ON WAREHOUSE _____ TO ROLE junior_analyst;
+
+-- Recheck access levels, then switch back.
+USE ROLE junior_analyst;
+SELECT * FROM trips LIMIT 10;
+USE ROLE sysadmin;
+SELECT * FROM trips LIMIT 10;
+
+-- If you need to try again:
+USE ROLE accountadmin;
+DROP ROLE junior_analyst;
+USE ROLE sysadmin;
+
+---------------------------------
+-- RESETTING THE ENVIRONMENT
+---------------------------------
+
+-- Reset your environment.
+USE ROLE accountadmin;
+DROP SHARE IF EXISTS crunchbase_company_data;
+DROP ROLE IF EXISTS junior_analyst;
+DROP DATABASE IF EXISTS bike;
+DROP DATABASE IF EXISTS crunchbase_company_data;
+-- Delete Crunchbase worksheet.
+

@@ -1,0 +1,311 @@
+INVESTIGATION----------------------------------------
+-- WEEK #5 - DATA TRANSFORMATION
+----------------------------------------
+
+-- Set the context.
+USE ROLE sysadmin;
+USE WAREHOUSE loading_wh;
+
+----------------------------------------
+-- CREATE DATABASE OBJECTS
+----------------------------------------
+
+-- Create the database.
+CREATE OR REPLACE DATABASE tacos;
+
+-- Create the orders table.
+CREATE OR REPLACE TABLE orders
+(
+    order_id integer,
+    truck_id integer,
+    timestamp timestamp_ntz(9),
+    amount number(38,2)
+);
+
+-- Create the (raw) trucks table.
+CREATE OR REPLACE TABLE trucks_raw
+(
+    truck_id integer,
+    city string,
+    region string,
+    country string,
+    franchise_flag integer,
+    year integer,
+    make string,
+    model string,
+    opening_date date
+);
+
+-- Create a stage that points to the S3 bucket.
+CREATE OR REPLACE STAGE taco_files
+    url = 's3://746-tacos';
+
+-- List files in the staging environment.
+LIST @taco_files;
+
+-- Create a file format that matches the files.
+CREATE OR REPLACE FILE FORMAT taco_csv
+    type='csv'
+    skip_header = 1
+    null_if = 'NULL';
+
+----------------------------------------
+-- LOAD ORDERS (no transformations needed)
+----------------------------------------
+
+-- Preview the orders file on staging.
+SELECT $1, $2, $3, $4 FROM @taco_files/orders.csv;
+
+-- Load the orders data.
+COPY INTO orders
+FROM @taco_files/orders.csv
+FILE_FORMAT = taco_csv;
+
+-- Preview the orders table.
+SELECT * FROM orders LIMIT 20;
+    
+----------------------------------------
+-- LOAD TRUCKS (transform before loading)
+----------------------------------------
+
+-- Preview the trucks file on staging.
+-- Review the transformations from the handout.
+SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9
+FROM @taco_files/trucks.csv (file_format => taco_csv);
+
+-- Query the file again, but reorder columns and trim the "model".
+SELECT $1, $3, $4, $5, $6, $7, $8, TRIM($9), $2
+FROM @taco_files/trucks.csv (file_format => taco_csv);
+
+
+-- Load the data with the transformations.
+COPY INTO trucks_raw
+FROM (
+    SELECT $1, $3, $4, $5, $6, $7, $8, TRIM($9), $2
+    FROM @taco_files/trucks.csv (file_format => taco_csv)
+);
+
+-- Preview the (raw) trucks table.
+SELECT * FROM trucks_raw LIMIT 20;
+
+----------------------------------------
+-- CONTINUE TRANSFORMATIONS AFTER LOADING (part 1) (CTAS)
+----------------------------------------
+
+-- Build a query that transforms the data.
+SELECT DISTINCT
+    truck_id,
+    INITCAP(city) AS city,
+    region,
+    CASE 
+        WHEN country = 15 THEN 'United States'
+        WHEN country = 3 THEN 'Canada'
+        ELSE 'Unkown'
+    END AS country,
+    franchise_flag,
+    year,
+    COALESCE(make, 'Custom') AS make,
+    model,
+    opening_date
+FROM trucks_raw;
+
+-- Copy the transformed data into a new table.
+CREATE OR REPLACE TABLE trucks AS
+    SELECT DISTINCT
+    truck_id,
+    INITCAP(city) AS city,
+    region,
+    CASE 
+        WHEN country = 15 THEN 'United States'
+        WHEN country = 3 THEN 'Canada'
+        ELSE 'Unkown'
+    END AS country,
+    franchise_flag,
+    year,
+    COALESCE(make, 'Custom') AS make,
+    model,
+    opening_date
+    FROM trucks_raw
+;
+
+-- Preview the (clean) trucks table.
+SELECT * FROM trucks LIMIT 20;
+
+----------------------------------------
+-- CONTINUE TRANSFORMATIONS AFTER LOADING (part 2) (UPDATE)
+----------------------------------------
+
+-- Query the truck "make" to explore the "Ford" issue.
+SELECT make FROM trucks LIMIT 20;
+
+-- Create a development table to avoid impacting production.
+CREATE OR REPLACE TABLE trucks_dev
+CLONE trucks;
+
+-- Preview the development table
+SELECT * FROM trucks_dev;
+
+-- Correct "Ford_" in the development table.
+UPDATE trucks_dev
+SET make = 'Ford'
+WHERE make = 'Ford_';
+
+-- Explore the "Ford" change in both tables.
+SELECT make FROM trucks_dev WHERE make LIKE 'Ford%' LIMIT 20;
+SELECT make FROM trucks WHERE make LIKE 'Ford%'LIMIT 20;
+
+-- Add a column to store “truck_age”.
+ALTER TABLE trucks_dev
+ADD COLUMN truck_age integer;
+
+-- Calculate the “truck_age”.
+UPDATE trucks_dev
+SET truck_age = (YEAR(CURRENT_DATE) - year);
+
+-- Confirm the age calculation is correct.
+SELECT truck_id, year, truck_age FROM trucks_dev;
+
+-- Fix the "Unknown" countries based on cities.
+UPDATE trucks_dev
+SET country = CASE city
+    WHEN 'Sydney' THEN 'Australia'
+    WHEN 'Melbourne' THEN 'Australia'
+    WHEN 'Sao Paulo' THEN 'Brazil'
+    WHEN 'Rio De Janeiro' THEN 'Brazil'
+    WHEN 'Cairo' THEN 'Egypt'
+    WHEN 'Manchester' THEN 'England'
+    WHEN 'London' THEN 'England'
+    WHEN 'Paris' THEN 'France'
+    WHEN 'Nice' THEN 'France'
+    WHEN 'Berlin' THEN 'Germany'
+    WHEN 'Hamburg' THEN 'Germany'
+    WHEN 'Munich' THEN 'Germany'
+    WHEN 'Delhi' THEN 'India'
+    WHEN 'Mumbai' THEN 'India'
+    WHEN 'Tokyo' THEN 'Japan'
+    WHEN 'Warsaw' THEN 'Poland'
+    WHEN 'Krakow' THEN 'Poland'
+    WHEN 'Barcelona' THEN 'Spain'
+    WHEN 'Madrid' THEN 'Spain'
+    WHEN 'Stockholm' THEN 'Sweden'
+    WHEN 'Seoul' THEN 'South Korea'
+    WHEN 'Cape Town' THEN 'South Africa'
+    ELSE country
+END;
+
+-- Make sure the countries are correct
+SELECT country from trucks_dev;
+
+-- Move the development table to production.
+ALTER TABLE trucks_dev
+SWAP WITH trucks;
+
+-- Validate the production table.
+SELECT truck_id, make, year, truck_age
+FROM trucks
+WHERE make LIKE 'Ford%';
+
+-- Drop the development table (no longer needed).
+DROP TABLE trucks_dev;
+
+----------------------------------------
+-- ANSWER BUSINESS QUESTIONS
+----------------------------------------
+
+-- Switch to our warehouse for querying data.
+USE WAREHOUSE query_wh;
+
+-- How many food trucks do we have
+SELECT COUNT(truck_id) FROM trucks;
+
+-- What types of trucks are in the fleet
+SELECT 
+    make,
+    model,
+    COUNT(*) AS num_trucks
+FROM trucks
+GROUP BY make, model
+ORDER BY num_trucks;
+
+-- How many trucks are company-owned vs franchise-owned?
+SELECT
+    CASE
+        WHEN franchise_flag = 1 THEN 'franchise_owned'
+        WHEN franchise_flag = 0 THEN 'company_owned'
+        ELSE 'unknown' 
+    END AS owner,
+    COUNT(owner) AS num_trucks
+FROM trucks
+GROUP BY owner;
+
+-- What are our five oldest company-owned vehicles?
+SELECT
+    make,
+    model,
+    truck_age
+FROM trucks
+WHERE franchise_flag = 0
+ORDER BY truck_age DESC
+LIMIT 5;
+
+-- Total truck revenue for each order id and the amouns
+SELECT 
+    truck_id,
+    order_id,
+    DATE(timestamp) AS order_date,
+    amount,
+    SUM(amount) OVER (PARTITION BY truck_id) AS total_truck_rev
+FROM orders
+ORDER BY total_truck_rev DESC, timestamp
+LIMIT 10;
+    
+-- Add the daily truck Revenue
+SELECT 
+    truck_id,
+    order_id,
+    DATE(timestamp) AS order_date,
+    amount,
+    SUM(amount) OVER (PARTITION BY truck_id) AS total_truck_rev,
+    SUM(amount) OVER (PARTITION BY truck_id, order_date) AS daily_truck_rev
+FROM orders
+ORDER BY total_truck_rev DESC, timestamp
+LIMIT 10;
+
+-- Add the cumlative truck revenue
+SELECT 
+    truck_id,
+    order_id,
+    DATE(timestamp) AS order_date,
+    amount,
+    SUM(amount) OVER (PARTITION BY truck_id) AS total_truck_rev,
+    SUM(amount) OVER (PARTITION BY truck_id, order_date) AS daily_truck_rev,
+    SUM(amount) OVER (PARTITION BY truck_id ORDER BY timestamp
+                      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) 
+                      AS cumulative_truck_rev
+FROM orders
+ORDER BY total_truck_rev DESC, timestamp
+LIMIT 10;
+
+-- Add the total truck orders
+SELECT 
+    truck_id,
+    order_id,
+    DATE(timestamp) AS order_date,
+    amount,
+    SUM(amount) OVER (PARTITION BY truck_id) AS total_truck_rev,
+    SUM(amount) OVER (PARTITION BY truck_id, order_date) AS daily_truck_rev,
+    SUM(amount) OVER (PARTITION BY truck_id ORDER BY timestamp
+                      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) 
+                      AS cumulative_truck_rev,
+    COUNT(*) OVER (PARTITION BY truck_id) AS total_truck_orders
+FROM orders
+ORDER BY total_truck_rev DESC, timestamp
+LIMIT 10;
+
+
+SELECT * FROM trucks;
+SELECT * FROM orders;
+
+
+
+

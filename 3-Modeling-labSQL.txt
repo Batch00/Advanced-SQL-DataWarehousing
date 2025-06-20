@@ -1,0 +1,288 @@
+---------------------------------
+-- WEEK #3 - DATA MODELING
+---------------------------------
+
+-- Set the context.
+USE ROLE sysadmin;
+USE WAREHOUSE loading_wh;
+
+---------------------------------
+-- CREATE THE DATABASE & TABLES
+---------------------------------
+
+-- Create a new database.
+CREATE DATABASE IF NOT EXISTS tickets;
+
+-- Create the tables.
+CREATE OR REPLACE TABLE listings (
+    listid integer not null,
+	sellerid integer not null,
+	eventid integer not null,
+	dateid smallint not null,
+	numtickets smallint not null,
+	priceperticket decimal(8,2),
+	totalprice decimal(8,2),
+	listtime timestamp
+);
+
+CREATE OR REPLACE TABLE sales (
+	salesid integer not null,
+	listid integer not null,
+	sellerid integer not null,
+	buyerid integer not null,
+	eventid integer not null,
+	dateid smallint not null,
+	qtysold smallint not null,
+	pricepaid decimal(8,2),
+	commission decimal(8,2),
+	saletime timestamp
+);
+
+CREATE OR REPLACE TABLE users (
+	userid integer not null,
+	username char(8),
+	firstname varchar(30),
+	lastname varchar(30),
+	city varchar(30),
+	state char(2),
+	email varchar(100),
+	phone char(14),
+	likesports boolean,
+	liketheatre boolean,
+	likeconcerts boolean,
+	likejazz boolean,
+	likeclassical boolean,
+	likeopera boolean,
+	likerock boolean,
+	likevegas boolean,
+	likebroadway boolean,
+	likemusicals boolean
+);
+
+CREATE OR REPLACE TABLE venues (
+	venueid smallint not null,
+	venuename varchar(100),
+	venuecity varchar(30),
+	venuestate char(2),
+	venueseats integer
+);
+   
+CREATE OR REPLACE TABLE categories (
+	catid smallint not null,
+	catgroup varchar(10),
+	catname varchar(10),
+	catdesc varchar(50)
+);
+
+CREATE OR REPLACE TABLE dates (
+	dateid smallint not null,
+	caldate date not null,
+	day character(3) not null,
+	week smallint not null,
+	month character(5) not null,
+	qtr character(5) not null,
+	year smallint not null,
+	holiday boolean default('N')
+);
+
+CREATE OR REPLACE TABLE events (
+	eventid integer not null,
+	venueid smallint not null,
+	catid smallint not null,
+	dateid smallint not null,
+	eventname varchar(200),
+	starttime timestamp
+);
+
+----------------------------------
+-- REVIEW THE ERD
+----------------------------------
+
+-- See the detailed ERD in the slides.
+
+----------------------------------
+-- LOAD ONE OF THE TABLES
+----------------------------------
+
+-- Create a staging area that points to the S3 bucket.
+CREATE OR REPLACE STAGE ticket_files
+    url = 's3://746-tickets';
+    
+-- List the files in the staging area (S3).
+LIST @ticket_files;
+
+-- Query some of the files in the staging area.
+SELECT $1 FROM @ticket_files/venues_pipe.txt LIMIT 20;
+SELECT $1 FROM @ticket_files/sales_tab.txt LIMIT 20;
+
+-- Create a file format that matches our tab-delimited files.
+CREATE OR REPLACE FILE FORMAT tickets_tab
+    type='csv'
+    field_delimiter = '\t'
+    record_delimiter = '\n'
+    skip_header = 0
+    trim_space = false
+    null_if = ('')
+    date_format = 'auto'
+    timestamp_format = 'auto'
+    error_on_column_count_mismatch = true;
+    
+-- Load data into the sales table.
+COPY INTO sales -- destination table
+  FROM @ticket_files/sales_tab -- source file(s) 
+  file_format = tickets_tab;
+
+SELECT * FROM sales LIMIT 10;
+
+----------------------------------
+-- ANSWER BUSINESS QUESTIONS
+----------------------------------
+
+-- Switch to the query warehouse.
+USE WAREHOUSE query_wh;
+
+-- ADD OTHER QUERIES FROM CLASS.
+
+-- time period of data
+SELECT
+    MIN(SALETIME) AS first_sale,
+    MAX(SALETIME) AS last_sale
+FROM sales;
+
+-- num tickets and revenue
+SELECT 
+    SUM(qtysold) AS num_tickets_sold,
+    SUM(commission) AS total_revenue
+FROM sales;
+
+-- average price paid per ticket
+SELECT
+    ROUND(SUM(pricepaid)/SUM(qtysold), 2) AS avg_ticket_price
+FROM sales;
+
+-- How many buyers were there
+SELECT
+    COUNT(DISTINCT(buyerid))
+FROM sales;
+
+-- How many sellers also bought tickets
+SELECT
+    COUNT(DISTINCT sellerid)
+FROM sales
+WHERE sellerid IN (SELECT buyerid
+                    FROM sales);
+
+-- what were the sales by year and quarter and what was QoQ change
+SELECT
+    YEAR(saletime) as year,
+    QUARTER(saletime) as quarter,
+    ROUND(SUM(pricepaid)/1000000, 2) AS quarterly_sales_mil,
+    LAG(quarterly_sales_mil) OVER (ORDER BY year, quarter) AS previous_sales_mil,
+    ROUND(((quarterly_sales_mil-previous_sales_mil)/previous_sales_mil),2) as change
+FROM sales
+GROUP BY year, quarter
+ORDER BY year, quarter;
+
+-- Day 2
+-- Calculate cumulative commission revenue by month in millions of dollars.  What was cumulative revenue at the end of September?
+SELECT
+    YEAR(saletime) as year,
+    MONTH(saletime) AS month,
+    ROUND(SUM(commission/1000000),3) AS revenue_mil,
+    SUM(revenue_mil) OVER (ORDER BY year,month 
+                       ROWS UNBOUNDED PRECEDING) AS cumlative_revenue_mil
+FROM sales
+GROUP BY year, month
+ORDER BY year, month;
+
+-- Calculate a 7-day rolling average of tickets sold.  On June 19th, what was the average?
+SELECT
+    MONTH(saletime) AS month,
+    DAY(saletime) AS day,
+    SUM(qtysold) AS tickets,
+    AVG(tickets) OVER (ORDER BY month, day
+                           ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS rolling_avg_7_days
+FROM sales
+GROUP BY month, day
+ORDER BY month, day;
+
+-- Calculate a 7-day rolling average of tickets sold.  On June 19th, what was the average?
+SELECT
+    DATE_TRUNC(day, saletime) AS day,
+    SUM(qtysold) AS tickets_sold,
+    AVG(tickets_sold) OVER (ORDER BY day
+                           ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS seven_day_avg
+FROM sales
+GROUP BY day
+ORDER BY day;
+
+-- Calculate buyer spend by event.  Additionally, in two other columns, show the buyer's total spend and the % of their total spend on the listed event.  For our largest buyer (#4303), what % of their spend was on event #7851?  (They spent the most money on that event. The concert was for a band called "Live".)
+SELECT
+    buyerid,
+    eventid,
+    SUM(pricepaid) AS buyer_event_spend,
+    SUM(buyer_event_spend) OVER (PARTITION BY buyerid) AS buyer_spend,
+    ROUND(buyer_event_spend/buyer_spend, 3)*100 AS pct_buyer_spend
+FROM sales
+GROUP BY buyerid, eventid
+ORDER BY buyer_spend DESC, buyer_event_spend DESC;
+
+
+
+----------------------------------
+-- EVALUTE QUERY PERFORMANCE
+----------------------------------
+
+-- QUERY PROFILE
+-- Provides execution details for a query.
+-- Includes graphs/stats to understand query components.
+
+-- Temporarily turn off cached results. (For experimentation.)
+ALTER SESSION SET USE_CACHED_RESULT = FALSE;
+
+-- Execute a query, which we'll review in the QUERY PROFILE.
+-- For each event, it shows tickets sold and averge ticket price.
+SELECT
+    eventid,
+    SUM(qtysold) AS tickets_sold,
+    ROUND(AVG(pricepaid/qtysold)) AS avg_price_per_ticket
+FROM sales
+GROUP BY eventid
+HAVING SUM(qtysold) >= 25
+ORDER BY SUM(qtysold) DESC;
+
+-- ANALYZE THE QUERY PROFILE
+-- In the query details, use the ellipse to view the profile.
+-- QUERY DETAILS TAB - shows summary information
+-- QUERY PROFILE TAB - see the SLIDES for more detail
+
+-- Use EXPLAIN as another way to breakdown the query.
+EXPLAIN
+SELECT
+    eventid,
+    SUM(qtysold) AS tickets_sold,
+    ROUND(AVG(pricepaid/qtysold)) AS avg_price_per_ticket
+FROM sales
+GROUP BY eventid
+HAVING SUM(qtysold) >= 25
+ORDER BY SUM(qtysold) DESC;;
+
+-- METADATA CACHE
+-- Snowflake stores COUNT, MAX, MIN, etc. in metadata cache.
+-- When needed, it can avoid table scans and calculations.
+-- It simply pulls those metrics from metadata cache.
+SELECT MAX(pricepaid), MIN(pricepaid) FROM sales;
+-- Then, view the QUERY PROFILE.
+
+-- Turn cache reuse back on.
+ALTER SESSION SET USE_CACHED_RESULT = TRUE;
+
+-- Rerun our previous query (twice if needed) to show results cache.
+SELECT
+    eventid,
+    SUM(qtysold) AS tickets_sold,
+    ROUND(AVG(pricepaid/qtysold)) AS avg_price_per_ticket
+FROM sales
+GROUP BY eventid
+HAVING SUM(qtysold) >= 25
+ORDER BY SUM(qtysold) DESC;

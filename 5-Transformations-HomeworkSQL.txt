@@ -1,0 +1,89 @@
+-- use "sysadmin" role
+USE ROLE sysadmin;
+-- Set the CONTEXT
+USE investigation.public;
+USE WAREHOUSE ghosts_loading_wh;
+
+-- Create the stage to access the crime data
+CREATE OR REPLACE STAGE investigation5921
+    url = 's3://investigation-5921/';
+
+-- List files in the staging environment.
+LIST @investigation5921;
+
+-- Preview the city officials file on staging.
+-- first official_id = 101147
+SELECT $1, $2, $3, $4, $5, $6, $7, $8 FROM @investigation5921/city_officials_augmented.csv;
+
+-- Clear city_officials table but do not delete it
+TRUNCATE TABLE city_officials;
+
+-- Add a column to store phone directory id.
+ALTER TABLE city_officials
+ADD COLUMN phone_directory_id integer;
+
+-- Load the data with the transformations.
+COPY INTO city_officials
+FROM (
+    SELECT $1, $2, $3, $4, $5, $7, $8, $6
+    FROM @investigation5921/city_officials_augmented.csv 
+    (file_format => ghosts_csv)
+);
+
+-- Transform the office locations
+UPDATE city_officials
+SET office_location = CASE office_location
+    WHEN 'Sector 1' THEN 'Business District'
+    WHEN 'Sector 2' THEN 'Downtown'
+    WHEN 'Sector 3' THEN 'East Market'
+    WHEN 'Sector 4' THEN 'Highview'
+    WHEN 'Sector 5' THEN 'Midtown'
+    WHEN 'Sector 6' THEN 'Riverside'
+    WHEN 'Sector 7' THEN 'Tech District'
+    WHEN 'Sector 8' THEN 'West End'
+    ELSE office_location
+END;
+
+-- Make sure the tranformations are correct. 
+-- Charles Lee Office Location - Downtown 
+SELECT * FROM city_officials;
+
+-- Create a view to provide structure
+CREATE OR REPLACE VIEW calls_to_victims AS
+    SELECT 
+        v.name AS victim_name,
+        pd.name AS caller_name,
+        c.caller_id,
+        c.call_id,
+        c.call_start_date,
+        v.homicide_date,
+        DATEDIFF(day, c.call_start_date, v.homicide_date) AS days_before_death,
+        c.call_status
+    FROM victim_detail_view v
+    JOIN call_log c ON v.directory_id = c.receiver_id
+    JOIN phone_directory pd ON c.caller_id = pd.directory_id
+    WHERE days_before_death BETWEEN 0 AND 14
+    ORDER BY v.name ASC, c.call_start_date DESC;
+
+-- Query the view to only show calls from city officials
+-- Omar Khan (57650) called Jane Patterson
+SELECT * 
+FROM calls_to_victims
+WHERE caller_id IN (SELECT DISTINCT(phone_directory_id) FROM city_officials);
+
+-- Which victim in the list were previouslt identifies as having the occupations: • AI Researcher• City Council Member• Civil Rights Lawyer• Community Organizer• Investigative Reporter
+SELECT * 
+FROM calls_to_victims
+WHERE caller_id IN (SELECT DISTINCT(phone_directory_id) FROM city_officials)
+AND victim_name IN (SELECT v.name
+                    FROM victim_profiles v
+                    WHERE v.occipation IN (
+                        'AI Researcher',
+                        'City Council Member',
+                        'Civil Rights Lawyer',
+                        'Community Organizer',
+                        'Investigative Reporter'
+                    ));
+
+
+

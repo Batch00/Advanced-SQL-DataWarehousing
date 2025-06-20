@@ -1,0 +1,192 @@
+-- use "sysadmin" role
+USE ROLE sysadmin;
+-- Set the CONTEXT
+USE investigation.public;
+USE WAREHOUSE ghosts_loading_wh;
+
+-- Create the forum activities table
+CREATE OR REPLACE TABLE forum_activities (
+    post_id integer,
+    user_id integer,
+    user_ip_address string,
+    post_title string,
+    post_category string,
+    post_date date
+);
+
+-- Create the city officials table
+CREATE OR REPLACE TABLE city_officials (
+    official_id integer,
+    name string,
+    position string,
+    department string,
+    office_location string,
+    tenure_start date,
+    ip_address string
+);
+
+-- Create the stage to access the crime data
+CREATE OR REPLACE STAGE investigation2134
+    url = 's3://investigation-2134/';
+
+-- Use a COPY COMMAND to load staged crime data into the table.
+COPY INTO forum_activities
+FROM @investigation2134 
+file_format = ghosts_csv
+PATTERN = 'forum_activities.*csv*';
+
+-- Use a COPY COMMAND to load staged crime data into the table.
+COPY INTO city_officials
+FROM @investigation2134
+file_format = ghosts_csv
+PATTERN = 'city_officials.*csv*';
+
+-- Switch to querying warehouse
+USE WAREHOUSE ghosts_query_wh;
+
+-- size of forum activities file
+LIST @investigation2134;
+
+-- Count the number of forum posts (360)
+SELECT COUNT(post_id) as num_posts 
+FROM forum_activities;
+
+-- Determine the data range of forum posts
+SELECT 
+    MIN(post_date) AS first_forum_date,
+    MAX(post_date) AS last_forum_date 
+FROM forum_activities;
+
+-- Determine the data range of officials tenure
+SELECT 
+    MIN(tenure_start) AS first_start_date,
+    MAX(tenure_start) AS last_start_date 
+FROM city_officials;
+
+
+-- Count the posts and cumlative posts by year and month
+-- 243 posts by the end of september
+SELECT
+    YEAR(post_date) as year,
+    MONTH(post_date) as month,
+    COUNT(*) as posts,
+    SUM(posts) OVER (ORDER BY year, month
+                    ROWS UNBOUNDED PRECEDING) AS cumlative_posts
+FROM forum_activities
+GROUP BY year, month
+ORDER BY year, month;
+    
+-- Rank the top 10 most active users based on number of posts
+-- Most active user id is 902842
+SELECT 
+    user_id,
+    COUNT(*) AS posts,
+    RANK() OVER (ORDER BY posts DESC) AS rank,
+FROM forum_activities
+GROUP BY user_id
+LIMIT 10;
+
+-- Count the total number of city officials (98)
+SELECT COUNT(official_id) AS num_officials
+FROM city_officials;
+
+-- Count the officials by department
+-- Mayors office has the most officials
+SELECT 
+    department,
+    COUNT(official_id) as num_officials
+FROM city_officials
+GROUP BY department
+ORDER BY num_officials DESC;
+
+-- Calculate each city offical's tenure in months
+-- Tom Johnson: 104 months
+SELECT
+    name,
+    tenure_start,
+    DATEDIFF(MONTH, tenure_start, '2025-01-01') AS tenure_months
+FROM city_officials
+ORDER BY tenure_months DESC;
+    
+-- Rank officials in each department by tenure
+-- Grid Safety & Enforcmment has the longest tenured official
+SELECT
+    name,
+    department,
+    tenure_start,
+    DATEDIFF(MONTH, tenure_start, '2025-01-01') AS tenure_months,
+    RANK() OVER (PARTITION by department 
+                 ORDER BY tenure_months DESC) AS rank
+FROM city_officials
+ORDER BY tenure_months DESC, department, rank;
+
+-- List the officials whose IP appears on the forum
+-- 5 officials were identified
+SELECT DISTINCT
+    c.name,
+    c.department,
+    f.user_ip_address
+FROM city_officials c
+INNER JOIN forum_activities f
+    ON c.ip_address = f.user_ip_address;
+
+-- List the officials and number of posts whose IP appears on the forum
+-- Christen Kirkwood made the most posts
+SELECT DISTINCT
+    c.name,
+    c.department,
+    f.user_ip_address,
+    COUNT(f.post_id) AS post_count
+FROM city_officials c
+INNER JOIN forum_activities f
+    ON c.ip_address = f.user_ip_address
+GROUP BY c.name, c.department, f.user_ip_address
+ORDER BY post_count DESC;
+
+-- List the officials, number of posts, and details whose IP appears on the forum
+-- Omar Khan wrote 'Our AI systems are reliable and trustworthy. Critics are just technophobes.'
+SELECT DISTINCT
+    c.name,
+    c.department,
+    f.post_category,
+    f.post_title,
+    f.post_date
+FROM city_officials c
+INNER JOIN forum_activities f
+    ON c.ip_address = f.user_ip_address;
+
+-- Update a table
+UPDATE city_officials SET position = 'AI Specialist';
+SELECT * FROM city_officials LIMIT 10;
+
+-- Identify previous 10 queries
+SELECT * 
+FROM table(information_schema.query_history_by_session (result_limit=>10));
+
+-- Restore the table using the query ID.
+CREATE OR REPLACE TABLE city_officials AS
+(SELECT * FROM city_officials before (statement => '01bad72e-0002-8497-0007-3052000ad10e'));
+
+-- Switch to Security Admin
+USE ROLE securityadmin;
+
+-- Create junior detectve role
+CREATE ROLE junior_detective;
+-- Assign role to my user
+GRANT ROLE junior_detective TO USER Batch00;
+-- grant role access to investigation database
+GRANT USAGE ON DATABASE investigation TO ROLE junior_detective;
+-- grant role access to the public schema
+GRANT USAGE ON SCHEMA investigation.public TO ROLE junior_detective;
+-- grant role acces to use the query warehouse
+GRANT USAGE ON WAREHOUSE ghosts_query_wh TO ROLE junior_detective;
+-- Provide read access to current and future tables
+GRANT SELECT ON ALL TABLES IN SCHEMA investigation.public TO ROLE junior_detective;
+-- Grant access to all future tables
+GRANT SELECT ON FUTURE TABLES IN SCHEMA investigation.public TO ROLE junior_detective;
+
+-- switch back to sysadmin
+USE ROLE sysadmin;
+
+-- validate the role
+SHOW ROLES LIKE 'junior_detective';

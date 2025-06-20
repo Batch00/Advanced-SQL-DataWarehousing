@@ -1,0 +1,139 @@
+-- use "sysadmin" role
+USE ROLE sysadmin;
+
+-- Create a WAREHOUSE for loading.
+CREATE OR REPLACE WAREHOUSE ghosts_loading_wh WITH
+    WAREHOUSE_SIZE='SMALL'
+    AUTO_RESUME = TRUE -- default
+    AUTO_SUSPEND = 180 -- default
+    INITIALLY_SUSPENDED = TRUE; -- default
+
+-- Create a WAREHOUSE for querying.
+CREATE OR REPLACE WAREHOUSE ghosts_query_wh WITH
+    WAREHOUSE_SIZE='SMALL'
+    AUTO_RESUME = TRUE -- default
+    AUTO_SUSPEND = 180 -- default
+    INITIALLY_SUSPENDED = TRUE; -- default
+
+-- Create a new database for investigation
+CREATE DATABASE IF NOT EXISTS investigation;
+
+-- Set the CONTEXT
+USE investigation.public;
+USE WAREHOUSE ghosts_loading_wh;
+
+-- Create the crime details table
+CREATE OR REPLACE TABLE crime_details (
+    crime_id integer,
+    victim_id integer,
+    date date,
+    time time,
+    location string,
+    type string
+);
+
+-- Create the victim profiles table
+CREATE OR REPLACE TABLE victim_profiles (
+    victim_id integer,
+    name string,
+    age integer,
+    occipation string,
+    address string,
+    district string
+);
+
+-- Create a STAGE that specifies the location of the crime data S3 bucket.
+CREATE OR REPLACE STAGE investigation1026
+    url = 's3://investigation-1026/';
+
+-- Create a FILE FORMAT that matches the data structure.
+CREATE OR REPLACE FILE FORMAT ghosts_csv
+    type='csv'
+    field_delimiter = ','
+    skip_header = 1
+    trim_space = true 
+    null_if = ('-') 
+    field_optionally_enclosed_by = '\042'
+    comment = 'file format for raw ghosts data'
+;
+
+-- Use a COPY COMMAND to load staged crime data into the table.
+COPY INTO crime_details
+FROM @investigation1026 
+file_format = ghosts_csv
+PATTERN = 'crime_details.*csv*';
+
+-- Use a COPY COMMAND to load staged crime data into the table.
+COPY INTO victim_profiles
+FROM @investigation1026 
+file_format = ghosts_csv
+PATTERN = 'victim_profiles.*csv';
+
+-- Switch to querying warehouse
+USE WAREHOUSE ghosts_query_wh;
+
+
+SELECT * FROM victim_profiles;
+
+-- Determine the date range of the crimss
+SELECT 
+    TO_CHAR(MIN(date), 'MM/DD/YY') AS first_crime_date,
+    TO_CHAR(MAX(date), 'MM/DD/YY') AS last_crime_date 
+FROM crime_details;
+
+-- How many crimes are in the data
+SELECT 
+    COUNT(*) AS num_crimes 
+FROM crime_details;
+
+-- Count the numer of crimes by type
+SELECT 
+    type,
+    COUNT(*) AS num_crimes
+FROM crime_details
+GROUP BY type
+ORDER BY num_crimes DESC;
+
+-- Count the number of crimes by type
+SELECT
+    location,
+    COUNT(*) AS num_crimes
+FROM crime_details
+GROUP BY location
+ORDER BY num_crimes DESC;
+
+-- Categorize and count crimes by time of day
+SELECT 
+    CASE 
+        WHEN time >= '06:00:00' AND time < '12:00:00' THEN 'Morning'
+        WHEN time >= '12:00:00' AND time < '18:00:00' THEN 'Afternoon'
+        WHEN time >= '18:00:00' AND time < '21:00:00' THEN 'Evening'
+        ELSE 'Night' 
+    END AS time_of_day,
+    COUNT(*) AS num_crimes
+FROM crime_details
+GROUP BY time_of_day
+ORDER BY num_crimes DESC;
+
+
+-- Calculate the average age of homicide victims
+SELECT AVG(age) AS average_age
+FROM victim_profiles
+WHERE victim_id IN (
+    SELECT victim_id
+    FROM crime_details
+    WHERE type = 'Homicide'
+);
+
+-- List Homicide victimes and their occupations
+SELECT v.name, v.occipation
+FROM victim_profiles v
+JOIN crime_details c ON v.victim_id = c.victim_id
+WHERE c.type = 'Homicide'
+AND v.occipation IN (
+    'AI Researcher', 
+    'City Council Member', 
+    'Civil Rights Lawyer', 
+    'Community Organizer', 
+    'Investigative Reporter'
+);

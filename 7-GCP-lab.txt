@@ -1,0 +1,47 @@
+SELECT
+  episode_id,
+  sum(damage_property) AS total_damage
+FROM
+  `bigquery-public-data.noaa_historic_severe_storms.storms_2024`
+GROUP BY episode_id
+ORDER BY total_damage DESC
+LIMIT
+  10;
+
+
+
+
+SELECT
+  episode_id,
+  state,
+  cz_name,
+  event_type,
+  event_begin_time
+FROM
+  `bigquery-public-data.noaa_historic_severe_storms.storms_2024`
+WHERE episode_id = 195637
+
+
+
+SELECT
+  event_type,
+  SUM(injuries_direct) + SUM(injuries_indirect) AS total_injuries
+FROM
+  `bigquery-public-data.noaa_historic_severe_storms.storms_2024`
+GROUP BY event_type
+ORDER BY total_injuries DESC;
+
+
+
+SELECT
+  state,
+  event_id,
+  event_type,
+  damage_property,
+  SUM(damage_property) OVER (PARTITION BY state) AS state_damage_total
+FROM
+  `bigquery-public-data.noaa_historic_severe_storms.storms_2024`
+WHERE damage_property > 0
+ORDER BY state, event_id
+LIMIT 10;
+

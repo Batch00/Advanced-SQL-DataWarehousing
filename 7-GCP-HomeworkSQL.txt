@@ -1,0 +1,80 @@
+-- When was the first complaint Received
+-- 2011-12-01
+SELECT
+  MIN(date_received)
+FROM
+  `bigquery-public-data.cfpb_complaints.complaint_database`;
+
+
+-- What subproduct caused the most complaints
+-- Credit reporting
+SELECT
+  subproduct,
+  COUNT(*) as num_complaints
+FROM
+  `bigquery-public-data.cfpb_complaints.complaint_database`
+GROUP BY subproduct
+ORDER BY num_complaints DESC;
+
+
+-- What company received the most complaints about cryptocurrencies
+-- Paypal Holdings, Inc
+SELECT
+  subproduct,
+  company_name,
+  COUNT(*) as num_complaints
+FROM
+  `bigquery-public-data.cfpb_complaints.complaint_database`
+WHERE subproduct = "Virtual currency" AND 
+      EXTRACT(YEAR FROM date_sent_to_company) = 2019
+GROUP BY company_name, subproduct
+ORDER BY num_complaints DESC;
+
+
+-- Compare the number of complaints received each month with the number of complaints received
+in the previous month.
+-- -2847
+WITH monthly_complaints AS (
+  SELECT
+    EXTRACT(MONTH FROM date_received) AS month,
+    COUNT(*) AS num_complaints
+  FROM `bigquery-public-data.cfpb_complaints.complaint_database`
+  WHERE EXTRACT(YEAR FROM date_received) = 2018
+  GROUP BY month
+)
+
+SELECT
+  month,
+  num_complaints,
+  LAG(num_complaints) OVER (ORDER BY month) AS prev_month,
+  num_complaints - LAG(num_complaints) OVER (ORDER BY month) AS change_from_prev_month
+FROM monthly_complaints
+ORDER BY month;
+
+
+-- What companies are doing a poor job of responding to complaints in a timely manner
+-- Mobiloans, LLC
+WITH complaints AS (
+  SELECT
+    company_name,
+    COUNT(*) AS num_complaints,
+    COUNT(CASE WHEN timely_response = FALSE THEN 1 END) AS
+  untimely_complaints
+  FROM `bigquery-public-data.cfpb_complaints.complaint_database`
+  GROUP BY company_name
+)
+SELECT
+  company_name,
+  num_complaints,
+  untimely_complaints,
+  ROUND((untimely_complaints / num_complaints)*100,2) AS percent_untimely
+FROM complaints
+WHERE num_complaints >= 200
+ORDER BY percent_untimely DESC;
+
+
+
+
+
+
+

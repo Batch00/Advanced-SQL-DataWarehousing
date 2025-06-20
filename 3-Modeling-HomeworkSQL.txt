@@ -1,0 +1,123 @@
+-- use "sysadmin" role
+USE ROLE sysadmin;
+-- Set the CONTEXT
+USE investigation.public;
+USE WAREHOUSE ghosts_loading_wh;
+
+-- Create the Phone Directory table
+CREATE OR REPLACE TABLE phone_directory (
+    directory_id integer,
+    phone_number string,
+    name string,
+    address string,
+    district string
+);
+
+-- Create the Call Log table
+CREATE OR REPLACE TABLE call_log (
+    call_id integer,
+    caller_id integer,
+    receiver_id integer,
+    call_duration integer,
+    call_start_date date,
+    call_status string
+);
+
+-- Create the stage to access the crime data
+CREATE OR REPLACE STAGE investigation3651
+    url = 's3://investigation-3651/';
+
+-- List files in stage
+LIST @investigation3651;
+
+-- Use a COPY COMMAND to load staged crime data into the table.
+COPY INTO phone_directory
+FROM @investigation3651 
+file_format = ghosts_csv
+PATTERN = 'phone_directory.*csv*';
+
+-- Use a COPY COMMAND to load staged crime data into the table.
+COPY INTO call_log
+FROM @investigation3651
+file_format = (null_if = ('N/A'), skip_header = 1)
+PATTERN = 'call_log.*csv*';
+
+-- See tables in database
+select table_schema, table_name
+from information_schema.tables
+where table_type = 'BASE TABLE';
+
+-- Switch to querying warehouse
+USE WAREHOUSE ghosts_query_wh;
+
+-- Count the number of calls
+-- 398,390 calls
+SELECT COUNT(*) FROM call_log;
+
+-- Determine the time span of the call data
+-- Last Call: 12/30/2023
+SELECT
+    MIN(call_start_date) AS first_call_date,
+    MAX(call_start_date) AS last_call_date 
+FROM call_log; 
+
+-- Calculate the % of calls that were answered
+-- 78 % of calls were answered
+WITH call_stats AS(
+    SELECT
+        COUNT(*) AS total_calls,
+        COUNT(CASE WHEN call_status = 'answered' THEN 1 END) AS answered_calls
+    FROM call_log
+)
+SELECT 
+    ROUND((answered_calls/total_calls)*100) AS answered_pct
+FROM call_stats;
+
+-- Calculate average cell duration in minutes
+-- Average Call Duration = 10.8
+SELECT
+    ROUND(AVG(call_duration/60),1) AS avg_duration
+FROM call_log
+WHERE call_status = 'answered';
+
+-- Calculate call volumn by month
+-- end of June 2023: 198,010
+SELECT
+    YEAR(call_start_date) AS year,
+    MONTH(call_start_date) AS month,
+    COUNT(*) as monthly_total,
+    SUM(monthly_total) OVER (ORDER BY year, month
+                             ROWS UNBOUNDED PRECEDING) AS running_total
+FROM call_log
+GROUP BY year, month
+ORDER BY year, month;
+
+-- Calculate outbound call volumne by district
+-- Tech District = 35,606
+SELECT
+    pd.district,
+    COUNT(*) AS outbound_call_volume
+FROM call_log cl
+INNER JOIN phone_directory pd ON cl.caller_id = pd.directory_id
+GROUP BY pd.district
+ORDER BY outbound_call_volume DESC;
+
+
+-- Create a view that combines the homicide victim data
+CREATE OR REPLACE VIEW victim_detail_view AS
+WITH victim_data AS (
+    SELECT 
+        vp.victim_id,
+        vp.name,
+        vp.address,
+        cd.date AS homicide_date,
+        pd.directory_id
+    FROM victim_profiles vp
+    JOIN crime_details cd ON vp.victim_id = cd.victim_id
+    JOIN phone_directory pd ON vp.address = pd.address
+    WHERE cd.type = 'Homicide'
+)
+SELECT * FROM victim_data;
+
+-- Make sure it looks correct
+SELECT * FROM victim_detail_view;

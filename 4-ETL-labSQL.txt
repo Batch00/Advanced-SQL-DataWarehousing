@@ -1,0 +1,282 @@
+---------------------------------
+-- WEEK #4 - EXTRACTION & LOADING
+---------------------------------
+
+-- Set the context.
+USE ROLE sysadmin;
+USE tickets.public;
+USE WAREHOUSE loading_wh;
+
+----------------------------------
+-- LOAD REMAINING TABLES
+----------------------------------
+
+-- List the files in the staging area (S3).
+LIST @ticket_files;
+
+-- Create a format that matches our pipe files.
+CREATE OR REPLACE FILE FORMAT tickets_pipe
+    type='csv'
+    field_delimiter = '|'
+    record_delimiter = '\n'
+    skip_header = 0
+    null_if = ('')
+;
+
+-----------
+-- LISTINGS
+-----------
+
+-- Preview the listings file(s) on staging.
+SELECT $1 FROM @ticket_files/listings LIMIT 100;
+
+-- Load data into the listings table.
+COPY INTO listings
+  FROM @ticket_files/listings
+  file_format = tickets_pipe;
+
+-- Preview the listings table.
+SELECT * FROM listings LIMIT 100;
+
+-----------
+-- DATES
+-----------
+
+-- Preview the date file(s) on staging.
+SELECT $1 FROM @ticket_files/dates LIMIT 100;
+
+-- Add a new column to the table. 
+ALTER TABLE dates
+ADD COLUMN season string;
+
+-- Load data into the dates table.
+COPY INTO dates
+  FROM @ticket_files/dates
+  file_format = tickets_pipe;
+
+-- Preview the dates table.
+SELECT * FROM dates LIMIT 100;
+
+-----------
+-- EVENTS
+-----------
+
+-- Preview the events file(s) on staging.
+SELECT $1 FROM @ticket_files/events LIMIT 100;
+
+-- Load data into the events table.
+COPY INTO events
+  FROM @ticket_files/events
+  file_format = tickets_pipe
+  ON_ERROR = 'CONTINUE';
+
+-- Preview the events table.
+SELECT * FROM events LIMIT 100;
+
+-----------
+-- USERS
+-----------
+
+-- Preview the user file(s) on staging.
+SELECT $1 FROM @ticket_files/users LIMIT 100;
+
+-- Load data into the users table.
+COPY INTO users
+  FROM @ticket_files/users
+  file_format = (field_delimiter = '|'
+                    trim_space = TRUE);
+
+-- Preview the users table.
+SELECT * FROM users LIMIT 100;
+
+-----------
+-- CATEGORIES
+-----------
+
+-- Query the category files(s) on staging.
+SELECT $1 FROM @ticket_files/categories LIMIT 100;
+
+-- Create a table to store the categories data (JSON).
+CREATE OR REPLACE TABLE categories_json (v variant);
+
+-- Load data into the categories table.
+COPY INTO categories_json
+  FROM @ticket_files/categories
+  file_format = (type = 'json'
+                    strip_outer_array = TRUE);
+
+-- Preview the categories data (JSON).
+SELECT * FROM categories_json;
+
+-- Create a view to structure the data.
+CREATE OR REPLACE VIEW categories_view AS
+SELECT
+    v:catid::integer AS catid,
+    v:catgroup::string AS catgroup,
+    v:catname::string AS catname,
+    v:catdesc::string AS catdesc
+FROM categories_json;
+
+-- Preview data in the categories view.
+SELECT * FROM categories_view;;
+
+-----------
+-- VENUES
+-----------
+
+-- Query the venues files(s) on staging.
+SELECT $1 FROM @ticket_files/venues LIMIT 200;
+
+-- Load data into the venues table.
+-- This will generate an ERROR that needs fixing.
+COPY INTO venues
+  FROM @ticket_files/venues
+  FILE_FORMAT = (field_delimiter = ':', null_if = 'NULL');
+
+-- Preview data in the venues table.
+SELECT * FROM venues LIMIT 100;
+
+----------------------------------
+-- UNLOADING DATA
+----------------------------------
+
+-- Instead of loading data into a table...
+-- We will UNLOAD DATA to a FILE, and put that on a STAGE.
+-- This is different than just exporting query results.
+-- Oftentimes, you will be exporting to an external stage like S3.
+
+----------------------------------
+
+-- UNLOAD TO AN INTERNAL, TABLE STAGE
+
+-- Copy the sales table into a file within its table stage.
+COPY INTO @%sales FROM sales;
+
+-- Examine the files in the TABLE STAGE.
+LIST @%sales;
+
+-- Verify there is data in the file.
+SELECT * FROM @%sales/data_0_0_0.csv.gz LIMIT 10;
+
+-- Download the file locally.  (ONLY WORKS IN SNOWSQL.)
+GET @%sales 'file:///C:/Users/_____/Downloads/'; -- For Windows
+GET @%sales 'file:///tmp/data/'; -- For Linux or Mac
+
+-- Remove files from the TABLE STAGE; then confirm the deletion.
+REMOVE @%sales;
+LIST @%sales;
+
+----------------------------------
+
+-- UNLOAD TO AN INTERNAL, NAMED STAGE
+
+-- Create a named stage.
+CREATE OR REPLACE STAGE tickets_named_stage;
+
+-- Copy the results from a query to the stage.
+COPY INTO @tickets_named_stage FROM
+    (SELECT * FROM sales);
+
+-- Examine the files in the NAMED STAGE.
+LIST @tickets_named_stage;
+
+-- Verify there is data in the file.
+SELECT $1, $2, $3 FROM @tickets_named_stage/data_0_0_0.csv.gz LIMIT 10;
+
+-- Remove the file from staging, and drop the stage.
+REMOVE @tickets_named_stage/data_0_0_0.csv.gz;
+LIST @tickets_named_stage;
+DROP STAGE tickets_named_stage;
+
+----------------------------------
+
+-- UNLOAD TO AN EXTERNAL, NAMED STAGE (AWS S3)
+
+-- Create the stage, which points to S3.
+-- This won't work as we haven't setup an integration with S3.
+CREATE OR REPLACE STAGE stage_tickets_s3
+    URL = 's3://746-tickets'
+    STORAGE_INTEGRATION = s3_int;
+
+----------------------------------
+-- ANSWERING BUSINESS QUESTIONS
+----------------------------------
+
+-- Switch to the query warehouse.
+USE WAREHOUSE query_wh;
+
+-- Revisit what the tables look like.
+SELECT * FROM listings LIMIT 10;
+SELECT * FROM sales LIMIT 10;
+SELECT * FROM venues LIMIT 10;
+SELECT * FROM events LIMIT 10;
+SELECT * FROM categories_view LIMIT 10;
+SELECT * FROM dates LIMIT 10;
+SELECT * FROM users LIMIT 10;
+
+-- Answer the business questions from class.
+
+-- What was the highest-selling individual event
+SELECT 
+    e.eventid,
+    e.eventname,
+    e.starttime,
+    ROUND(SUM(s.pricepaid)) AS total_sales 
+FROM sales s
+LEFT JOIN events e USING(eventid)
+GROUP BY e.eventid, e.eventname, e.starttime
+ORDER BY total_sales DESC;
+
+-- Who bought the most tickets
+SELECT 
+    s.buyerid,
+    u.firstname,
+    u.lastname,
+    SUM(s.qtysold) AS total_tickets
+FROM sales s
+LEFT JOIN users u
+ON s.buyerid = u.userid
+GROUP BY s.buyerid, u.firstname, u.lastname
+ORDER BY total_tickets DESC;
+
+-- Tickets by season with running total
+SELECT 
+    d.caldate AS day,
+    d.season AS season,
+    SUM(qtysold) AS tickets_sold,
+    SUM(tickets_sold) OVER (ORDER BY d.caldate
+                            ROWS UNBOUNDED PRECEDING) AS cumlative_tickets,
+    SUM(tickets_sold) OVER (PARTITION BY d.season) AS tickets_season
+FROM sales s
+LEFT JOIN dates d USING(dateid)
+GROUP BY d.caldate, d.season
+ORDER BY d.caldate;
+
+-- num tickets and ticket total by category name
+WITH tickets_by_event AS (
+    SELECT 
+        e.eventid,
+        e.catid,
+        SUM(l.numtickets) AS tickets_listed
+    FROM listings l 
+    LEFT JOIN events e 
+    ON l.eventid = e.eventid
+    GROUP BY e.eventid, e.catid
+)
+SELECT 
+    c.catname,
+    SUM(t.tickets_listed) AS listed_tickets,
+    SUM(listed_tickets) OVER () AS listed_tickets_total
+FROM tickets_by_event t
+INNER JOIN categories_view c
+ON t.catid = c.catid
+GROUP BY c.catname;
+
+
+---------------------------------
+-- RESETTING THE ENVIRONMENT
+---------------------------------
+
+-- Reset your environment.
+_____;
+_____;

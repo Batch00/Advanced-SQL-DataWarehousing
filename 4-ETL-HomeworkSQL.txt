@@ -1,0 +1,160 @@
+-- use "sysadmin" role
+USE ROLE sysadmin;
+-- Set the CONTEXT
+USE investigation.public;
+USE WAREHOUSE ghosts_loading_wh;
+
+-- Clear call_log table but do not delete it
+TRUNCATE TABLE call_log;
+
+-- Create the stage to access the crime data
+CREATE OR REPLACE STAGE investigation4275
+    url = 's3://investigation-4275/';
+
+-- Create a FILE FORMAT that matches the data structure.
+CREATE OR REPLACE FILE FORMAT ghosts_pipe
+    type='txt'
+    field_delimiter = '|'
+    skip_header = 1
+    trim_space = true 
+    null_if = ('N/A') 
+    field_optionally_enclosed_by = '\042'
+    comment = 'file format for raw ghosts data with pipe delimiter';
+
+-- List files in stage
+LIST @investigation4275;
+
+-- Use a COPY COMMAND to validate loading staged crime data into the table.
+COPY INTO call_log
+FROM @investigation4275 
+file_format = ghosts_pipe
+PATTERN = 'call_log.*txt*'
+VALIDATION_MODE = 'RETURN_ERRORS';
+
+-- Use a COPY COMMAND to load staged crime data into the table.
+COPY INTO call_log
+FROM @investigation4275 
+file_format = ghosts_pipe
+PATTERN = 'call_log.*txt*';
+
+-- Copy the call_log table into a file within its table stage.
+COPY INTO @%call_log FROM call_log;
+
+-- Examine the files in the TABLE STAGE.
+LIST @%call_log;
+
+-- Verify there is data in the file.
+SELECT * FROM @%call_log/data_0_0_0.csv.gz LIMIT 10;
+
+-- Switch to querying warehouse
+USE WAREHOUSE ghosts_query_wh;
+
+-- Explore the tables to refresh on what is in what
+SELECT * FROM victim_detail_view LIMIT 10;
+SELECT * FROM crime_details LIMIT 10;
+SELECT * FROM victim_profiles LIMIT 10;
+SELECT * FROM forum_activities LIMIT 10;
+SELECT * FROM city_officials LIMIT 10;
+SELECT * FROM phone_directory LIMIT 10;
+SELECT * FROM call_log LIMIT 10;
+
+-- Query to count inbound calls per victim, join with victim details, order by name
+-- Anita Gomez = 62
+SELECT 
+    v.name AS victim_name,
+    COUNT(c.call_id) AS inbound_calls
+FROM victim_detail_view v
+JOIN call_log c ON v.directory_id = c.receiver_id
+GROUP BY v.name
+ORDER BY v.name;
+
+-- List the inbound calls recieved by these victims
+-- Most recent to Alex Martinez = 2023-12-11
+SELECT 
+    v.name AS victim_name,
+    c.caller_id,
+    c.call_id,
+    c.call_start_date,
+    c.call_status
+FROM victim_detail_view v
+JOIN call_log c 
+ON v.directory_id = c.receiver_id
+ORDER BY v.name ASC, c.call_start_date DESC;
+
+-- List the inbound calls recieved by these victims 14 days before homicide
+-- 54528 called Emily Thornton two days before her homicide
+SELECT 
+    v.name AS victim_name,
+    c.caller_id,
+    c.call_id,
+    c.call_start_date,
+    v.homicide_date,
+    DATEDIFF(day, c.call_start_date, v.homicide_date) AS days_before_death,
+    c.call_status
+FROM victim_detail_view v
+JOIN call_log c 
+ON v.directory_id = c.receiver_id
+WHERE days_before_death BETWEEN 0 AND 14
+ORDER BY v.name ASC, c.call_start_date DESC;
+
+-- List the inbound calls recieved by these victims 14 days before homicide but include the caller name
+-- Doroteya Hasson called Samir Patel one day before his death
+SELECT 
+    v.name AS victim_name,
+    pd.name AS caller_name,
+    c.caller_id,
+    c.call_id,
+    c.call_start_date,
+    v.homicide_date,
+    DATEDIFF(day, c.call_start_date, v.homicide_date) AS days_before_death,
+    c.call_status
+FROM victim_detail_view v
+JOIN call_log c ON v.directory_id = c.receiver_id
+JOIN phone_directory pd ON c.caller_id = pd.directory_id
+WHERE days_before_death BETWEEN 0 AND 14
+ORDER BY v.name ASC, c.call_start_date DESC;
+
+-- Create a table to store JSON data
+CREATE OR REPLACE TABLE video_activity_json (v VARIANT);
+
+-- Load JSON data
+COPY INTO video_activity_json
+FROM @investigation4275/video_activity.json
+FILE_FORMAT = (TYPE = 'JSON' 
+               STRIP_OUTER_ARRAY = TRUE);
+
+-- Preview JSON Table
+SELECT * FROM video_activity_json;
+
+-- Create a view to provide structure
+CREATE OR REPLACE VIEW video_activity_view AS
+SELECT 
+    v:camera_location::STRING AS camera_location,
+    v:camera_status::STRING AS camera_status,
+    v:footage_id::NUMBER AS footage_id,
+    v:observed_activity::STRING AS observed_activity,
+    TO_TIMESTAMP(v:timestamp::STRING, 'MM/DD/YYYY HH24:MI') AS timestamp
+FROM video_activity_json;
+
+SELECT * FROM video_activity_view;
+
+-- Determine time span of data
+-- Most recent activity: 2024-01-14
+SELECT 
+    MAX(timestamp) AS most_recent_activity,
+    MIN(timestamp) AS oldest_activity
+FROM video_activity_view;
+
+-- List video activities on days when homicides occurred
+-- 3 video activities on 12/28/2023
+SELECT *
+FROM video_activity_view va
+WHERE TO_DATE(va.timestamp) IN (
+    SELECT DISTINCT TO_DATE(v.homicide_date)
+    FROM victim_detail_view v
+)
+ORDER BY va.timestamp DESC;
+
+-- Suspects: Linda Johnson, Gregory Hayes are my prime suspects.
+-- Both of these individuals are Government officials whose ip address showed up on the forum. They all advocate heavily on multiple different post in support of AI. These two officials also made calls to victims of homicide.
+

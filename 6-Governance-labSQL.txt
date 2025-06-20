@@ -1,0 +1,174 @@
+----------------------------------------
+-- WEEK #6 - DATA GOVERNANCE
+----------------------------------------
+
+-- Set the context.
+USE ROLE sysadmin;
+USE WAREHOUSE loading_wh;
+USE DATABASE tacos;
+
+---------------------------------------------------
+-- LOAD NEW DATA (CUSTOMERS)
+---------------------------------------------------
+
+-- List files in the staging environment.
+LIST @taco_files;
+
+-- Create the customers table.
+CREATE OR REPLACE TABLE customer_loyalty
+(
+    customer_id integer,
+    first_name string,
+    last_name string,
+    city string,
+    country string,
+    registration_date date,
+    birthdate date,
+    email string,
+    phone_number string    
+);
+
+-- Load the customer loyalty data.
+COPY INTO customer_loyalty
+    FROM @taco_files/customers.csv
+    FILE_FORMAT = taco_csv;
+
+-- Preview the customer loyalty data.
+SELECT * FROM customer_loyalty LIMIT 20;
+
+---------------------------------------------------
+-- CREATE A NEW WAREHOUSE FOR TESTING
+---------------------------------------------------
+
+-- Create a new warehouse for testing.
+CREATE OR REPLACE WAREHOUSE taco_test_wh WITH
+    WAREHOUSE_SIZE='X-SMALL'
+    AUTO_RESUME = TRUE
+    AUTO_SUSPEND = 600
+    INITIALLY_SUSPENDED = TRUE;
+
+---------------------------------------------------
+-- CREATE A RESOURCE MONITOR (a governance mechanism)
+---------------------------------------------------
+
+-- Switch to the account admin role.
+USE ROLE accountadmin;
+
+-- Create a resource monitor
+CREATE OR REPLACE RESOURCE MONITOR taco_test_rm
+WITH CREDIT_QUOTA = 100
+     FREQUENCY = monthly
+     START_TIMESTAMP = immediately
+     TRIGGERS 
+        ON 75 PERCENT DO NOTIFY -- notify admins
+        ON 100 PERCENT DO SUSPEND -- suspend (let queries finish)
+        ON 110 PERCENT DO SUSPEND_IMMEDIATE; -- suspend (cancel queries)
+
+-- Apply a resource monitor to our warehouse
+ALTER WAREHOUSE taco_test_wh
+SET RESOURCE_MONITOR = taco_test_rm;
+
+-- List our warehouses. (See the resource monitor field.)
+SHOW WAREHOUSES;
+
+---------------------------------------------------
+-- PROTECT THE WAREHOUSE FROM LONG-RUNNING QUERIES
+---------------------------------------------------
+
+-- Check the warehouse statement parameters
+SHOW PARAMETERS LIKE '%statement%' IN WAREHOUSE taco_test_wh;
+
+-- Adjust the statement timeout parameter
+ALTER WAREHOUSE taco_test_wh SET statement_timeout_in_seconds = 1800;
+
+-- Adjusted the statement queued timeout parameter
+ALTER WAREHOUSE taco_test_wh SET statement_queued_timeout_in_seconds = 600;
+
+-- Recheck the warehouse statement parameters
+SHOW PARAMETERS LIKE '%statement%' IN WAREHOUSE taco_test_wh;
+
+-- As a note, you could also adjust this at for your own account
+-- ALTER ACCOUNT SET statement_timeout_in_seconds = 18000; 
+
+---------------------------------------------------
+-- EXPLORE ROLES IN OUR ACCOUNT
+---------------------------------------------------
+
+-- List the roles in our account.
+SHOW ROLES;
+
+-- Examine the system-defined roles.
+SELECT "name", "comment"
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
+WHERE "name" IN ('ORGADMIN','ACCOUNTADMIN','SYSADMIN','USERADMIN','SECURITYADMIN','PUBLIC');
+
+---------------------------------------------------
+-- CREATE A ROLE & GRANT PRIVILEGES
+---------------------------------------------------
+
+-- Switch to the "useradmin" role to create our test role
+USE ROLE useradmin;
+
+-- Create a test role
+CREATE OR REPLACE ROLE taco_test_role;
+
+-- Add the new test role to our user account
+SET my_user = CURRENT_USER();
+GRANT ROLE taco_test_role TO USER identifier($my_user);
+
+-- Switch to the test user and attempt to query a table
+USE ROLE taco_test_role;
+SELECT truck_id, make, model FROM trucks;
+
+-- Switch to the "securityadmin" role to grant privileges
+USE ROLE securityadmin;
+
+-- Grant warehouse privileges
+GRANT OPERATE, USAGE ON WAREHOUSE taco_test_wh TO ROLE taco_test_role;
+
+-- Grant database, schema, and table privileges
+GRANT USAGE ON DATABASE tacos TO ROLE taco_test_role;
+GRANT USAGE ON ALL SCHEMAS IN DATABASE tacos TO ROLE taco_test_role;
+GRANT SELECT ON ALL TABLES IN SCHEMA tacos.public TO ROLE taco_test_role;
+
+-- Switch to the test user and attempt to query a table
+USE ROLE taco_test_role;
+USE WAREHOUSE taco_test_wh;
+SELECT truck_id, make, model FROM trucks;
+
+---------------------------------------------------
+-- ANSWER BUSINESS QUESTIONS
+---------------------------------------------------
+
+-- "How many customers registered for the loyalty program?"
+-- 199353
+
+SELECT COUNT(*) AS num_customers FROM customer_loyalty;
+
+-- "What is the average age of those customers?"
+-- 52.260282
+
+SELECT 
+    AVG(DATEDIFF(year, birthdate, CURRENT_DATE())) AS avg_age
+FROM customer_loyalty;
+
+-- "Where are those customers located?"
+
+SELECT
+    city,
+    country,
+    COUNT(*) as num_customers
+FROM customer_loyalty
+GROUP BY city, country
+ORDER BY num_customers DESC;
+
+-- "Are we seeing growth in registrations over time?"
+
+SELECT
+    YEAR(registration_date) as year,
+    COUNT(*) AS current_year,
+    LAG(current_year) OVER (ORDER BY year) AS previous_year,
+    ((current_year - previous_year) / previous_year) * 100 AS growth_rate
+FROM customer_loyalty
+GROUP BY year;
+

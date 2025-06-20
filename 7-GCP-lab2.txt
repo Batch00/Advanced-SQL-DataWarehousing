@@ -1,0 +1,30 @@
+-- Query 1
+SELECT
+  source,
+  COUNT(*) AS num_event
+FROM
+  `bigquery-public-data.noaa_historic_severe_storms.storms_*`
+GROUP BY source
+ORDER BY num_event DESC;
+
+
+-- Query 2
+WITH total_damage AS (
+  SELECT
+    EXTRACT(YEAR FROM event_begin_time) as year,
+    ROUND(SUM(damage_property)/1000000, 2) AS damage_total_mil_current_year
+  FROM
+    `bigquery-public-data.noaa_historic_severe_storms.storms_20*`
+  GROUP BY year
+)
+SELECT 
+  year,
+  damage_total_mil_current_year,
+  LAG(damage_total_mil_current_year) OVER (ORDER BY year) AS damage_total_mil_previous_year
+FROM total_damage
+ORDER BY year ASC;
+
+-- Query 3
+
+
+  

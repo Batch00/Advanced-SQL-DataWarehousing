@@ -1,0 +1,100 @@
+-- use "sysadmin" role
+USE ROLE sysadmin;
+-- Set the CONTEXT
+USE investigation.public;
+USE WAREHOUSE ghosts_loading_wh;
+
+-- Switch to account admin role
+USE ROLE accountadmin;
+
+-- Create a new resource monitor
+CREATE OR REPLACE RESOURCE MONITOR ghosts_rm
+WITH CREDIT_QUOTA = 200
+     FREQUENCY = monthly 
+     START_TIMESTAMP = immediately
+     TRIGGERS 
+        ON 80 PERCENT DO NOTIFY -- notify admins
+        ON 100 PERCENT DO SUSPEND_IMMEDIATE; -- suspend (cancel queries)
+
+-- apply the monitor to the ghosts query warehouse
+ALTER WAREHOUSE ghosts_query_wh
+SET RESOURCE_MONITOR = ghosts_rm;
+
+-- Show all the warehouses
+SHOW WAREHOUSES;
+
+-- Check the warehouse statement parameters
+SHOW PARAMETERS LIKE '%statement%' IN WAREHOUSE ghosts_query_wh;
+
+-- Adjust the statement timeout parameter
+ALTER WAREHOUSE ghosts_query_wh SET statement_timeout_in_seconds = 3600;
+
+-- Adjusted the statement queued timeout parameter
+ALTER WAREHOUSE ghosts_query_wh SET statement_queued_timeout_in_seconds = 900;
+
+-- Recheck the warehouse statement parameters
+SHOW PARAMETERS LIKE '%statement%' IN WAREHOUSE ghosts_query_wh;
+
+-- Switch to User Admin Role
+USE ROLE useradmin;
+
+-- Create a test role
+CREATE OR REPLACE ROLE ghosts_query_role;
+
+-- Add the new role to our user account
+SET my_user = CURRENT_USER();
+GRANT ROLE ghosts_query_role TO USER identifier($my_user);
+
+-- List the roles (1)
+SHOW ROLES;
+
+-- Switch to Security Admin Role
+USE ROLE securityadmin;
+
+-- Grant warehouse privileges
+GRANT OPERATE, USAGE ON WAREHOUSE ghosts_query_wh TO ROLE ghosts_query_role;
+
+-- Grant database, schema, and view privileges
+GRANT USAGE ON DATABASE investigation TO ROLE ghosts_query_role;
+GRANT USAGE ON ALL SCHEMAS IN DATABASE investigation TO ROLE ghosts_query_role;
+GRANT SELECT ON ALL VIEWS IN SCHEMA investigation.public TO ROLE ghosts_query_role;
+
+-- Switch to new role 
+USE ROLE ghosts_query_role;
+USE WAREHOUSE ghosts_query_wh;
+
+-- Anne Richardson lived at 203 Heights Ave
+SELECT * FROM victim_detail_view
+WHERE name = 'Anne Richardson';
+
+-- Change contect again
+USE ROLE sysadmin;
+USE WAREHOUSE ghosts_query_wh;
+
+-- Create new view after that only shows calls from city officials
+CREATE OR REPLACE VIEW calls_to_victims_by_officials AS
+    SELECT * 
+    FROM calls_to_victims
+    WHERE caller_id IN (SELECT DISTINCT(phone_directory_id) FROM city_officials);
+
+-- List the officials posts that contain AI in the title
+CREATE OR REPLACE VIEW forum_posts_by_officials AS
+    SELECT DISTINCT
+        c.name,
+        c.department,
+        f.post_category,
+        f.post_title,
+        f.post_date
+    FROM city_officials c
+    INNER JOIN forum_activities f
+        ON c.ip_address = f.user_ip_address
+    WHERE post_title LIKE '%AI%';
+
+-- What city officials appear in both of these views
+-- Linda Johnson, Omar Khan, and Gregory Hayes appear in both
+
+SELECT DISTINCT f.name
+FROM forum_posts_by_officials f
+JOIN calls_to_victims_by_officials c
+  ON f.name = c.caller_name;
+  
